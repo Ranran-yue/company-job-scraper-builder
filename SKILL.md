@@ -33,7 +33,9 @@ Use this skill when the task is to create or adapt a scraper for a company's car
 - Use official APIs first when available.
 - If the site is undocumented, inspect browser network traffic to find search/list and detail endpoints.
 - Capture pagination, filters, public job URL shape, and fields needed for output.
+- **Early-stop on multi-query pagination.** When running multiple search queries (e.g., "Software Engineer" + "AI Engineer"), later queries often overlap heavily. Track seen job IDs across queries and stop paginating a query after 2 consecutive pages with 0 new unique jobs.
 - **Verify server-side filters actually work.** Some APIs accept filter/sort parameters silently but ignore them (e.g., a `sort_by=date` param that falls back to default sorting). Test with a small request and inspect the response order before relying on server-side filtering.
+- **Sort parameters can also break search relevance.** Some APIs (e.g., Apple's `sort=newest`) silently disable keyword matching when a sort parameter is applied, returning all jobs site-wide by date instead of keyword-relevant results. Always compare result titles between sort modes to confirm keyword filtering is still active.
 
 ### 2. Normalize resume input
 
@@ -64,6 +66,7 @@ Default multi-resume behavior:
 
 - Cache the job list separately from job details.
 - Cache per-job detail fetches so reruns do not repeat site traffic.
+- **Fetch detail pages concurrently.** Use a thread pool (e.g., `ThreadPoolExecutor` with 5 workers) for detail page fetches. Sequential fetching at 1 req/sec for 200+ jobs takes 3+ minutes; 5 concurrent workers cut this to under a minute.
 - Cache match results independently so prompt tuning can rerun matching without re-scraping.
 - Keep generated artifacts out of git.
 
@@ -71,6 +74,7 @@ Default multi-resume behavior:
 
 - Score only from explicit JD evidence.
 - Penalize level mismatch and domains the resume does not support.
+- **Penalize years-of-experience gaps.** If the JD requires significantly more YoE than the candidate has, subtract points (e.g., −2 for 2+ year gap, −4 for 5+ year gap). Include `years_experience` in the candidate profile.
 - Thin or vague JDs should not receive top scores — cap at 6 even if promising.
 - Require strict machine-readable output from the LLM (minified JSON, no markdown fences).
 - Keep reasons short and evidence-based (one sentence, ~30 words max).
@@ -106,13 +110,18 @@ Default multi-resume behavior:
 
 - Working scraper code
 - `requirements.txt`
-- `.env.example` with documented tuning knobs:
+- `.env.example` with **stable config only** (things that rarely change between runs):
   - API key placeholder
-  - `JOB_LIMIT` (debug limiter)
   - `MATCH_CONCURRENCY` and provider-specific request-rate controls
   - `MAX_DESCRIPTION_CHARS` (token cost control)
   - `MATCH_MAX_RETRIES` and `MATCH_RETRY_BACKOFF_SECONDS`
   - `USE_BATCH_API` (opt-in, default false)
+  - `DETAIL_FETCH_WORKERS` (concurrent detail page fetchers, default 5)
+- **CLI arguments** for per-run knobs (things users tweak each run):
+  - `--job-limit` (debug limiter)
+  - `--max-pages` (pagination cap)
+  - `--max-days-old` (recency filter)
+  - Other run-specific overrides
 - `.gitignore` (exclude `.env`, `.venv`, `cache/`, generated output files)
 - README when the repo does not already have one
 - clear debug and full-run commands

@@ -29,6 +29,42 @@ Keep job-list, details, resume profiles, and match results separate so each stag
 - The match stage should be resume-safe: load existing results on startup, skip already-scored jobs, save incrementally during the run.
 - Per-job detail caches (one file per job ID) make the detail fetch stage resume-safe for partial runs.
 
+### Concurrent detail fetching
+
+Sequential detail page fetching (1 req/sec) is the bottleneck for large scrapes — 200 jobs takes 3+ minutes. Use a thread pool to parallelize:
+
+```python
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+DETAIL_FETCH_WORKERS = int(os.getenv("DETAIL_FETCH_WORKERS", "5"))
+
+with ThreadPoolExecutor(max_workers=DETAIL_FETCH_WORKERS) as pool:
+    futures = {pool.submit(fetch_detail, job_id): job_id for job_id in uncached_ids}
+    for future in as_completed(futures):
+        job_id = futures[future]
+        # save to cache/job_details/{job_id}.json
+```
+
+5 workers typically cut fetch time from 3+ minutes to under a minute. Respect the site's rate limits — if the careers API returns 429s, reduce workers or add per-request delays.
+
+### CLI args vs .env separation
+
+Put **stable config** in `.env` (things that rarely change between runs):
+- API keys
+- Rate-limit settings (`MATCH_CONCURRENCY`, `DETAIL_FETCH_WORKERS`)
+- Token cost controls (`MAX_DESCRIPTION_CHARS`)
+- Retry settings (`MATCH_MAX_RETRIES`, `MATCH_RETRY_BACKOFF_SECONDS`)
+- `USE_BATCH_API`
+
+Put **per-run knobs** as CLI arguments (things users tweak each run):
+- `--job-limit` (debug limiter)
+- `--max-pages` (pagination cap)
+- `--max-days-old` (recency filter)
+- `--queries` (search terms)
+- `--output` (output file path)
+
+Users shouldn't have to edit `.env` every time they want a quick test run vs a full scrape.
+
 ## Resume handling
 
 If resume files are provided, they are the source of truth. Extract text and derive structured profiles automatically, then cache those profiles in `cache/resume_profiles/`.
@@ -42,7 +78,10 @@ Pre-extracted constants are still useful, but only as:
 Either way, each profile should include:
 
 - `target_role_family`
-- `years_experience`
+- `years_experience` — total years of relevant professional experience (integer). Used to derive YoE penalties during scoring:
+  - If JD requires N+2 or more years than the candidate has: subtract 2 from score
+  - If JD requires N+5 or more years: subtract 4 from score
+  - Include this penalty table in the scoring prompt so the LLM applies it consistently
 - `level_fit` (e.g., "Senior/IC4 sweet spot, not ready for Principal/IC5+")
 - `tier_1_strengths` (core differentiators, weighted heavily)
 - `tier_2_strengths` (strong skills, moderate weight)
@@ -102,6 +141,17 @@ Prefer official APIs over HTML scraping when both exist.
 
 **Gotcha — verify server-side filters.** Some APIs accept filter/sort parameters silently but ignore them. For example, a `sort_by=date` param that falls back to distance-based sorting. Always test with a small request and inspect the actual response order. If server-side filtering is unreliable, scrape all results and filter/sort client-side.
 
+**Gotcha — sort parameters can break keyword relevance.** Some APIs (e.g., Apple's `sort=newest`) silently disable keyword matching when a sort parameter is applied, returning all jobs site-wide by date instead of keyword-filtered results. Always compare result titles between sort modes — if adding a sort param causes unrelated jobs to appear, drop the sort and sort client-side.
+
+### Early-stop on multi-query pagination
+
+When running multiple search queries (e.g., "Software Engineer", "AI Engineer", "ML Engineer"), later queries often return jobs already seen in earlier queries. To avoid wasting requests:
+
+- Track all seen job IDs in a set across queries.
+- For each query, count consecutive pages that yield 0 new unique jobs.
+- After 2 consecutive zero-new-job pages, stop paginating that query and move to the next.
+- Log the early-stop event so the user can see how many pages were skipped.
+
 ## Matching prompt pattern
 
 Keep the prompt evidence-based and conservative.
@@ -125,6 +175,10 @@ Treat prompt caching as optional. Before relying on it, verify the current provi
 - score only from explicit JD evidence
 - do not assume missing stack details
 - apply level penalties for title and years mismatch (e.g., subtract 2-3 points for Principal/Staff/Distinguished)
+- **apply YoE penalties when the JD requires significantly more experience than the candidate has:**
+  - 2+ year gap (JD asks for N+2 or more): subtract 2
+  - 5+ year gap (JD asks for N+5 or more): subtract 4
+  - If the JD doesn't specify YoE, skip this penalty
 - apply level bonuses for the candidate's sweet spot (e.g., Senior IC4)
 - penalize domains the candidate clearly lacks
 - cap thin or vague JDs at a moderate score (e.g., 6) even if they sound promising
