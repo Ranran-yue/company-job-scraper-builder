@@ -75,6 +75,8 @@ Default multi-resume behavior:
 - Score only from explicit JD evidence.
 - Penalize level mismatch and domains the resume does not support.
 - **Penalize years-of-experience gaps.** If the JD requires significantly more YoE than the candidate has, subtract points (e.g., −2 for 2+ year gap, −4 for 5+ year gap). Include `years_experience` in the candidate profile.
+- **AI role sub-type check.** "AI" covers at least three distinct disciplines: (1) LLM application / agent platform (LangChain, RAG, prompt engineering), (2) MLOps / model training infrastructure (Spark, distributed training, PyTorch pipelines), and (3) ML research (novel architectures, publications). A candidate strong in one sub-type has near-zero overlap with the others. Check the role's primary sub-type first and cap the score early (≤4) if the candidate's profile does not match the sub-type at all.
+- **Core-skills-missing cap.** If 3 or more primary required skills are absent from the candidate's profile, cap the score at 5 regardless of supporting-skill overlap. Broad skills like Python or distributed systems should not carry a score above that threshold when all domain-specific requirements are missing.
 - Thin or vague JDs should not receive top scores — cap at 6 even if promising.
 - Require strict machine-readable output from the LLM (minified JSON, no markdown fences).
 - Keep reasons short and evidence-based (one sentence, ~30 words max).
